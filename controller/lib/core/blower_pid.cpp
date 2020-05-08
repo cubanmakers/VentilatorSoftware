@@ -44,11 +44,6 @@ static constexpr float Kd = Ku * Tu.seconds() / 15;
 // input.  DIRECT as opposed to REVERSE.
 static PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
-// TODO: VOLUME_INTEGRAL_INTERVAL was not chosen carefully.
-static constexpr Duration VOLUME_INTEGRAL_INTERVAL = milliseconds(5);
-static Time last_flow_measurement_time = millisSinceStartup(0);
-static float last_flow_ml_per_min = NAN;
-
 void blower_pid_init() {
   Setpoint = 0;
   Input = 0;
@@ -62,44 +57,11 @@ void blower_pid_init() {
   myPID.SetMode(AUTOMATIC);
 }
 
-static void update_volume(SensorReadings *readings) {
-  // TODO: This calculation should be much more sophisticated.  Some possible
-  // improvements.
-  //
-  //  - Periodically re-zero the volume (e.g. what happens if the tubes are
-  //    disconnected from the patient?)
-  //
-  //  - Measure time with better than millisecond granularity.
-  Time now = Hal.now();
-  if (isnan(last_flow_ml_per_min)) { // First time
-    readings->volume_ml = 0;
-    last_flow_ml_per_min = readings->flow_ml_per_min;
-    last_flow_measurement_time = now;
-  } else if (Duration delta = now - last_flow_measurement_time;
-             delta >= VOLUME_INTEGRAL_INTERVAL) {
-    readings->volume_ml += delta.minutes() *
-                           (last_flow_ml_per_min + readings->flow_ml_per_min) /
-                           2;
-    last_flow_ml_per_min = readings->flow_ml_per_min;
-    last_flow_measurement_time = now;
-  }
-}
-
-void blower_pid_execute(const BlowerSystemState &desired_state,
-                        SensorReadings *readings, float *fan_power) {
-  // Open/close the solenoid as appropriate.
-  //
-  // Our solenoid is "normally open", so low voltage means open and high
-  // voltage means closed.  Hardware spec: https://bit.ly/3aERr69
-  Hal.digitalWrite(BinaryPin::SOLENOID,
-                   desired_state.expire_valve_state == ValveState::OPEN
-                       ? VoltageLevel::HAL_LOW
-                       : VoltageLevel::HAL_HIGH);
-
-  Pressure cur_pressure = get_patient_pressure();
+float blower_pid_execute(const BlowerSystemState &desired_state,
+                         float current_pressure_cm_h2o) {
 
   Setpoint = desired_state.setpoint_pressure.kPa();
-  Input = cur_pressure.kPa();
+  Input = cmH2O(current_pressure_cm_h2o).kPa();
   myPID.Compute();
 
   // If the blower is not enabled, immediately shut down the fan.  But for
@@ -107,20 +69,7 @@ void blower_pid_execute(const BlowerSystemState &desired_state,
   if (!desired_state.blower_enabled) {
     Output = 0;
   }
-  Hal.analogWrite(PwmPin::BLOWER, static_cast<int>(Output));
 
   // fan_power is in range [0, 1].
-  *fan_power = stl::min(stl::max(Output, 0.f), 255.f) / 255.f;
-
-  // Store sensor readings so they can eventually be sent to the GUI.
-  // This pressure is just from the patient sensor, converted to the right
-  // units.
-  readings->pressure_cm_h2o = cur_pressure.cmH2O();
-
-  // Flow rate is inhalation flow minus exhalation flow. Positive value is flow
-  // into lungs, and negative is flow out of lungs.
-  readings->flow_ml_per_min =
-      (get_volumetric_inflow() - get_volumetric_outflow()).ml_per_min();
-
-  update_volume(readings);
+  return Output / 255.f;
 }

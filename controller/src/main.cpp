@@ -113,6 +113,9 @@ static void controller_loop() {
     DEV_MODE_comms_handler();
 #endif
 
+    // get sensor readings
+    controller_status.sensor_readings = get_sensor_readings();
+
     controller_status.active_params = gui_status.desired_params;
 
     // TODO: Add additional fields to the ControllerStatus proto:
@@ -120,11 +123,25 @@ static void controller_loop() {
     //   - Expiratory solenoid valve state (open/closed).
     BlowerSystemState desired_state =
         blower_fsm_desired_state(controller_status.active_params);
+
     controller_status.fan_setpoint_cm_h2o =
         desired_state.setpoint_pressure.cmH2O();
 
-    blower_pid_execute(desired_state, &controller_status.sensor_readings,
-                       &controller_status.fan_power);
+    controller_status.fan_power = blower_pid_execute(
+        desired_state, controller_status.sensor_readings.pressure_cm_h2o);
+
+    // activate actuators
+    // Open/close the solenoid as appropriate.
+    //
+    // Our solenoid is "normally open", so low voltage means open and high
+    // voltage means closed.  Hardware spec: https://bit.ly/3aERr69
+    Hal.digitalWrite(BinaryPin::SOLENOID,
+                     desired_state.expire_valve_state == ValveState::OPEN
+                         ? VoltageLevel::HAL_LOW
+                         : VoltageLevel::HAL_HIGH);
+    // set blower PWM
+    Hal.analogWrite(PwmPin::BLOWER,
+                    static_cast<int>(controller_status.fan_power * 255));
     Hal.watchdog_handler();
   }
 }
